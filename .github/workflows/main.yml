@@ -1,214 +1,40 @@
-name: CI
-on: [push, pull_request]
+name: Upstream Sync
+
 permissions:
-  contents: read
-env:
-  NODE_VERSION: 18
+  contents: write
+
+on:
+  schedule:
+    - cron: "0 0 * * *" # every day
+  workflow_dispatch:
+
 jobs:
-  setup:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          check-latest: true
-          cache: npm
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build project
-        run: npm run build
-        env:
-          NODE_ENV: ${{ startsWith(github.ref, 'refs/tags/v') && 'release' || '' }}
-
-      - name: Cache setup
-        uses: actions/cache@v4
-        with:
-          path: ./*
-          key: ${{ runner.os }}-${{ github.ref }}-${{ github.sha }}-setup
-
-  build-docs:
+  sync_latest_from_upstream:
+    name: Sync latest commits from upstream repo
     runs-on: ubuntu-latest
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@v4
-
-      - name: Set up Ruby
-        uses: ruby/setup-ruby@v1
-        with:
-          bundler-cache: true
-          working-directory: ./docs
-
-      - name: Run jekyll build
-        working-directory: ./docs
-        run: bundle exec jekyll build --strict_front_matter
-
-  lint:
-    needs: setup
-    runs-on: ubuntu-latest
-    steps:
-      - name: Restore setup
-        uses: actions/cache@v4
-        with:
-          path: ./*
-          key: ${{ runner.os }}-${{ github.ref }}-${{ github.sha }}-setup
-
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - name: Run lint task
-        run: npm run lint
-
-  bundlemon:
-    needs: setup
-    if: github.repository_owner == 'Leaflet'
-    runs-on: ubuntu-latest
-    steps:
-      - name: Restore setup
-        uses: actions/cache@v4
-        with:
-          path: ./*
-          key: ${{ runner.os }}-${{ github.ref }}-${{ github.sha }}-setup
-
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - name: Build project
-        run: npm run build
-        env:
-          NODE_ENV: release
-
-      - name: Run bundlemon task
-        run: npm run bundlemon
-        env:
-          CI_COMMIT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-
-  test-ssr:
-    needs: setup
-    runs-on: ubuntu-latest
+    if: ${{ github.event.repository.fork }}
 
     steps:
-      - name: Restore setup
-        uses: actions/cache@v4
+      # Step 1: run a standard checkout action
+      - name: Checkout target repo
+        uses: actions/checkout@v3
+
+      # Step 2: run the sync action
+      - name: Sync upstream changes
+        id: sync
+        uses: aormsby/Fork-Sync-With-Upstream-action@v3.4
         with:
-          path: ./*
-          key: ${{ runner.os }}-${{ github.ref }}-${{ github.sha }}-setup
+          upstream_sync_repo: Leaflet/Leaflet
+          upstream_sync_branch: main
+          target_sync_branch: main
+          target_repo_token: ${{ secrets.GITHUB_TOKEN }} # automatically generated, no need to set
 
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
+          # Set test_mode true to run tests instead of the true action!!
+          test_mode: false
 
-      - name: Run Node.js SSR script
-        run: node ./spec/ssr/ssr_node.mjs
-
-      - name: Set up Deno
-        uses: denoland/setup-deno@v1
-        with:
-          deno-version: v1.x
-
-      - name: Run Deno SSR script
-        run: deno run ./spec/ssr/ssr_deno.js
-
-  test:
-    needs: setup
-    runs-on: ${{ matrix.os || 'ubuntu-latest' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - browser: Chrome
-          - browser: Firefox
-          - browser: FirefoxNoTouch
-          - browser: FirefoxRetina
-          - browser: Chrome
-            os: windows-latest
-          - browser: Chrome
-            os: macos-latest
-          - browser: SafariNative
-            os: macos-latest
-    steps:
-      - name: Restore setup
-        uses: actions/cache@v4
-        with:
-          path: ./*
-          key: ${{ runner.os }}-${{ github.ref }}-${{ github.sha }}-setup
-
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - name: Set up Google Chrome
-        uses: browser-actions/setup-chrome@v1
-        if: contains(matrix.browser, 'Chrome')
-
-      - name: Set up Firefox
-        uses: browser-actions/setup-firefox@v1
-        if: contains(matrix.browser, 'Firefox')
-
-      - name: Run tests on ${{ matrix.browser }}
-        run: npm test -- --browsers ${{ matrix.browser }} --single-run
-
-  publish-artifacts:
-    needs: setup
-    if: github.repository_owner == 'Leaflet' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
-    runs-on: ubuntu-latest
-    steps:
-      - name: Restore setup
-        uses: actions/cache@v4
-        with:
-          path: ./*
-          key: ${{ runner.os }}-${{ github.ref }}-${{ github.sha }}-setup
-
-      - name: Compress artifacts
-        working-directory: dist
-        run: zip -r leaflet.zip .
-
-      - name: Publish artifacts
-        uses: jakejarvis/s3-sync-action@v0.5.1
-        with:
-          args: --acl public-read --delete --exact-timestamps
-        env:
-          AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          SOURCE_DIR: dist
-          DEST_DIR: content/leaflet/${{ github.ref_name }}
-
-  publish-npm:
-    needs: setup
-    if: github.repository_owner == 'Leaflet' && startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    steps:
-      - name: Restore setup
-        uses: actions/cache@v4
-        with:
-          path: ./*
-          key: ${{ runner.os }}-${{ github.ref }}-${{ github.sha }}-setup
-
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          registry-url: https://registry.npmjs.org
-
-      - name: Publish to NPM
+      - name: Sync check
+        if: failure()
         run: |
-          TAG=$(echo $GITHUB_REF_NAME | grep -oP '^v\d+\.\d+\.\d+-?\K(\w+)?')
-          npm publish --tag ${TAG:-latest}
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          echo "[Error] 由于上游仓库的 workflow 文件变更，导致 GitHub 自动暂停了本次自动更新，你需要手动 Sync Fork 一次，详细教程请查看：https://github.com/Yidadaa/ChatGPT-Next-Web/blob/main/README_CN.md#%E6%89%93%E5%BC%80%E8%87%AA%E5%8A%A8%E6%9B%B4%E6%96%B0"
+          echo "[Error] Due to a change in the workflow file of the upstream repository, GitHub has automatically suspended the scheduled automatic update. You need to manually sync your fork. Please refer to the detailed tutorial for instructions: https://github.com/Yidadaa/ChatGPT-Next-Web#enable-automatic-updates"
+          exit 1
